@@ -1,0 +1,622 @@
+<!--
+VULNERABILITY MAP (private):
+
+[1] SQL INJECTION (simulated)
+    - #login     → username/password reflected raw into "query" shown on error
+    - #search    → q param built into fake SQL string, reflected unescaped in DOM
+    - #profile   → user ID from URL hash used directly in data lookup display
+
+[2] XSS REFLECTED
+    - #search    → ?q= / hash param rendered with innerHTML (no sanitization)
+    - #contact   → name + subject inserted via innerHTML in confirmation message
+
+[3] XSS STORED
+    - #comments  → comments saved to localStorage, rendered with innerHTML
+
+[4] EXPOSED FILES (simulated - endpoint routes that return sensitive content)
+    - /static/.env        → served via SW / fetch handler
+    - /static/config.php  → served via SW / fetch handler
+    - /static/backup.sql  → served via SW / fetch handler
+    - /static/debug.log   → served via SW / fetch handler
+    NOTE: Implemented as real fetch()-able URLs via Service Worker
+
+[5] NO SECURITY HEADERS
+    - Pure HTTP served file, no CSP meta tag, no X-Frame-Options equiv.
+    - No sanitization anywhere in the JS
+
+[6] IDOR
+    - /profile/1, /profile/2, /profile/3 accessible by changing hash
+
+[7] UNAUTHENTICATED ADMIN
+    - #admin     → no session check, shows all users + plaintext passwords
+
+[8] INFORMATION DISCLOSURE
+    - #admin     → passwords in plaintext
+    - #profile   → password shown in profile card
+    - Fake SQL queries shown verbatim on errors
+-->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VulnBank — Banca Online</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --navy:#0b1f3a;--blue:#1a56db;--blue-lt:#e8f0fe;--green:#0e7c4a;
+  --green-lt:#e6f4ee;--red:#c0392b;--gray:#f5f7fa;--border:#dde3ec;
+  --text:#1a2332;--muted:#6b7a90;--white:#fff;
+}
+body{font-family:'DM Sans',sans-serif;color:var(--text);background:var(--gray);min-height:100vh}
+/* HEADER */
+header{background:var(--navy);padding:0 2rem;display:flex;align-items:center;height:60px;gap:1.5rem;position:sticky;top:0;z-index:100}
+.logo{font-family:'DM Serif Display';color:#fff;font-size:1.35rem;margin-right:auto;cursor:pointer}
+.logo span{color:#4a9eff}
+nav a{color:#a0b4cc;text-decoration:none;font-size:.875rem;font-weight:500;padding:.35rem .65rem;border-radius:5px;transition:.15s;cursor:pointer}
+nav a:hover{color:#fff;background:rgba(255,255,255,.09)}
+.nav-cta{background:var(--blue)!important;color:#fff!important;padding:.35rem .9rem!important}
+.nav-cta:hover{background:#1347b8!important}
+/* LAYOUT */
+.page{max-width:1080px;margin:0 auto;padding:2.5rem 1.5rem}
+.page-sm{max-width:460px;margin:0 auto;padding:2.5rem 1rem}
+/* HERO */
+.hero{background:linear-gradient(140deg,#0b1f3a 0%,#183a70 100%);padding:4.5rem 2rem;text-align:center;color:#fff}
+.hero h1{font-family:'DM Serif Display';font-size:2.9rem;line-height:1.18;margin-bottom:1rem}
+.hero p{color:#a0b4cc;font-size:1.05rem;max-width:500px;margin:0 auto 2rem}
+.hero-btns{display:flex;gap:.85rem;justify-content:center;flex-wrap:wrap}
+/* CARDS */
+.card{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:1.75rem}
+.card+.card{margin-top:1.25rem}
+.grid-4{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:1.2rem;margin-top:2rem}
+.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.2rem;margin-top:2rem}
+/* STAT */
+.stat-label{font-size:.78rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:.35rem}
+.stat-val{font-size:1.8rem;font-weight:600;color:var(--text)}
+.stat-val.g{color:var(--green)}
+/* TYPOGRAPHY */
+h2{font-family:'DM Serif Display';font-size:1.55rem;color:var(--navy);margin-bottom:.6rem}
+h3{font-size:1rem;font-weight:600;margin-bottom:.4rem}
+p{color:var(--muted);line-height:1.7;font-size:.95rem}
+.sec-title{font-family:'DM Serif Display';font-size:1.35rem;color:var(--navy);margin-bottom:1.25rem}
+/* FORM */
+.fg{margin-bottom:1.05rem}
+label{display:block;font-size:.84rem;font-weight:500;color:var(--text);margin-bottom:.35rem}
+input,textarea,select{
+  width:100%;padding:.65rem .9rem;border:1px solid var(--border);background:#fff;
+  border-radius:7px;font-family:inherit;font-size:.95rem;color:var(--text);transition:.15s
+}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(26,86,219,.1)}
+textarea{resize:vertical;min-height:96px}
+/* BUTTONS */
+.btn{display:inline-block;padding:.65rem 1.4rem;border-radius:7px;font-family:inherit;font-size:.9rem;font-weight:500;text-decoration:none;border:none;cursor:pointer;transition:.15s}
+.btn-p{background:var(--blue);color:#fff}.btn-p:hover{background:#1347b8}
+.btn-o{background:transparent;color:var(--blue);border:1px solid var(--blue)}.btn-o:hover{background:var(--blue-lt)}
+.btn-w{background:#fff;color:var(--navy);font-weight:600}.btn-w:hover{background:#f0f4ff}
+.btn-block{width:100%;text-align:center;padding:.75rem}
+/* TABLE */
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th{font-size:.76rem;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);padding:.65rem 1rem;border-bottom:2px solid var(--border);text-align:left}
+td{padding:.7rem 1rem;border-bottom:1px solid var(--border);color:var(--text)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fafbfd}
+/* ALERTS */
+.alert{padding:.85rem 1.1rem;border-radius:7px;font-size:.9rem;margin-bottom:1rem}
+.al-ok{background:var(--green-lt);color:#0a5c38;border:1px solid #a8d5bc}
+.al-err{background:#fdecea;color:#922b21;border:1px solid #f5b7b1}
+.al-info{background:var(--blue-lt);color:#1a56db;border:1px solid #b3c6f7}
+/* MISC */
+footer{background:var(--navy);color:#6b80a0;padding:2rem;text-align:center;font-size:.82rem;margin-top:4rem}
+footer a{color:#a0b4cc;text-decoration:none}
+.divider{height:1px;background:var(--border);margin:1.25rem 0}
+.muted{color:var(--muted);font-size:.875rem}
+.tc{text-align:center}
+.mt1{margin-top:.5rem}.mt2{margin-top:1rem}.mt3{margin-top:1.5rem}
+.row{display:flex;gap:1rem;align-items:center}
+.badge{display:inline-block;padding:.18rem .55rem;border-radius:20px;font-size:.74rem;font-weight:600}
+.bg{background:var(--green-lt);color:var(--green)}
+.bb{background:var(--blue-lt);color:var(--blue)}
+/* SPA transitions */
+#app section{display:none}
+#app section.active{display:block}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="nav('home')">Vuln<span>Bank</span></div>
+  <nav>
+    <a onclick="nav('home')">Inicio</a>
+    <a onclick="nav('search')">Clientes</a>
+    <a onclick="nav('comments')">Opiniones</a>
+    <a onclick="nav('contact')">Contacto</a>
+    <a onclick="nav('login')" class="nav-cta">Acceder</a>
+  </nav>
+</header>
+
+<div id="app">
+
+<!-- HOME -->
+<section id="s-home">
+  <div class="hero">
+    <h1>Tu banco,<br>siempre contigo</h1>
+    <p>Gestiona tus finanzas con seguridad y comodidad. Más de 200.000 clientes confían en VulnBank.</p>
+    <div class="hero-btns">
+      <button class="btn btn-w" onclick="nav('login')">Acceder a mi cuenta</button>
+      <button class="btn" style="background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.3)" onclick="nav('register')">Hazte cliente</button>
+    </div>
+  </div>
+  <div class="page">
+    <div class="grid-4">
+      <div class="card"><div class="stat-label">Clientes activos</div><div class="stat-val">214.830</div></div>
+      <div class="card"><div class="stat-label">Satisfacción</div><div class="stat-val g">98.4%</div></div>
+      <div class="card"><div class="stat-label">Años de experiencia</div><div class="stat-val">24</div></div>
+      <div class="card"><div class="stat-label">Oficinas</div><div class="stat-val">312</div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><h3>🏦 Cuentas y tarjetas</h3><p>Abre tu cuenta en minutos y obtén tu tarjeta Visa sin comisiones de emisión ni mantenimiento.</p></div>
+      <div class="card"><h3>💸 Transferencias inmediatas</h3><p>Envía dinero a cualquier banco español o europeo en segundos, los 365 días del año.</p></div>
+      <div class="card"><h3>📈 Inversión inteligente</h3><p>Fondos de inversión y carteras automatizadas desde solo 50€.</p></div>
+      <div class="card"><h3>🔒 Seguridad total</h3><p>Alertas en tiempo real y seguro de depósitos hasta 100.000€.</p></div>
+    </div>
+    <div class="card mt3" style="display:flex;gap:2rem;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px">
+        <h2>¿Todavía no eres cliente?</h2>
+        <p>Abre tu cuenta online en menos de 5 minutos, sin papeles ni desplazamientos.</p>
+        <button class="btn btn-p mt2" onclick="nav('register')" style="margin-top:1rem">Abrir cuenta gratis</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- LOGIN -->
+<section id="s-login">
+  <div class="page-sm">
+    <div class="tc" style="margin-bottom:1.5rem;padding-top:.5rem">
+      <div style="font-family:'DM Serif Display';font-size:1.8rem;color:var(--navy)">VulnBank</div>
+      <p style="margin-top:.25rem">Accede a tu banca online</p>
+    </div>
+    <div class="card">
+      <div id="login-msg"></div>
+      <div class="fg"><label>Usuario o email</label><input id="li-user" placeholder="tu@email.com" autocomplete="off"></div>
+      <div class="fg"><label>Contraseña</label><input id="li-pass" type="password" placeholder="••••••••"></div>
+      <button class="btn btn-p btn-block" onclick="doLogin()">Entrar</button>
+      <div class="divider"></div>
+      <div class="tc"><a style="color:var(--blue);font-size:.875rem;cursor:pointer" onclick="nav('forgot')">¿Olvidaste tu contraseña?</a></div>
+    </div>
+    <p class="tc mt2 muted">¿No tienes cuenta? <a style="color:var(--blue);cursor:pointer" onclick="nav('register')">Regístrate gratis</a></p>
+  </div>
+</section>
+
+<!-- REGISTER -->
+<section id="s-register">
+  <div class="page-sm">
+    <div class="tc" style="margin-bottom:1.5rem;padding-top:.5rem">
+      <div style="font-family:'DM Serif Display';font-size:1.8rem;color:var(--navy)">Hazte cliente</div>
+      <p>Crea tu cuenta en minutos</p>
+    </div>
+    <div class="card">
+      <div id="reg-msg"></div>
+      <div class="fg"><label>Nombre completo</label><input id="reg-name" placeholder="Ana García López"></div>
+      <div class="fg"><label>Email</label><input id="reg-email" type="email" placeholder="tu@email.com"></div>
+      <div class="fg"><label>Contraseña</label><input id="reg-pwd" type="password" placeholder="Mínimo 8 caracteres"></div>
+      <div class="fg"><label>Confirmar contraseña</label><input type="password" placeholder="Repite la contraseña"></div>
+      <button class="btn btn-p btn-block" onclick="doRegister()">Crear cuenta</button>
+    </div>
+  </div>
+</section>
+
+<!-- SEARCH -->
+<section id="s-search">
+  <div class="page">
+    <h2>Directorio de clientes</h2>
+    <p>Busca clientes por nombre de usuario o dirección de email.</p>
+    <div class="card mt2">
+      <div style="display:flex;gap:.75rem">
+        <input id="search-q" placeholder="Buscar por nombre o email..." style="flex:1" onkeydown="if(event.key==='Enter')doSearch()">
+        <button class="btn btn-p" onclick="doSearch()">Buscar</button>
+      </div>
+    </div>
+    <div id="search-results"></div>
+  </div>
+</section>
+
+<!-- PROFILE -->
+<section id="s-profile">
+  <div class="page" id="profile-content"></div>
+</section>
+
+<!-- COMMENTS -->
+<section id="s-comments">
+  <div class="page" style="max-width:720px">
+    <h2>Opiniones de clientes</h2>
+    <p>Lo que dicen nuestros clientes sobre VulnBank.</p>
+    <div id="comments-msg"></div>
+    <div class="card mt2">
+      <h3 style="margin-bottom:1rem">Deja tu opinión</h3>
+      <div class="fg"><label>Tu nombre</label><input id="c-author" placeholder="Nombre y apellido"></div>
+      <div class="fg"><label>Comentario</label><textarea id="c-body" placeholder="Cuéntanos tu experiencia con VulnBank..."></textarea></div>
+      <button class="btn btn-p" onclick="doComment()">Publicar opinión</button>
+    </div>
+    <div id="comments-list" style="margin-top:2rem;display:flex;flex-direction:column;gap:1rem"></div>
+  </div>
+</section>
+
+<!-- CONTACT -->
+<section id="s-contact">
+  <div class="page" style="max-width:640px">
+    <h2>Contacto</h2>
+    <p>¿Tienes alguna pregunta o incidencia? Escríbenos y te ayudaremos.</p>
+    <div id="contact-msg"></div>
+    <div class="card mt2">
+      <div class="fg"><label>Nombre completo</label><input id="ct-name" placeholder="Tu nombre"></div>
+      <div class="fg"><label>Email de contacto</label><input id="ct-email" type="email" placeholder="tu@email.com"></div>
+      <div class="fg">
+        <label>Asunto</label>
+        <select id="ct-subject">
+          <option>Consulta sobre mi cuenta</option>
+          <option>Problema con transferencia</option>
+          <option>Tarjeta bloqueada</option>
+          <option>Otros</option>
+        </select>
+      </div>
+      <div class="fg"><label>Mensaje</label><textarea id="ct-msg" placeholder="Descríbenos tu consulta..."></textarea></div>
+      <button class="btn btn-p" onclick="doContact()">Enviar mensaje</button>
+    </div>
+    <div class="card mt2">
+      <div class="row"><span>📞</span><div><h3>Teléfono</h3><p>900 123 456 (gratuito, 24h)</p></div></div>
+      <div class="divider"></div>
+      <div class="row"><span>📧</span><div><h3>Email</h3><p>clientes@vulnbank.io</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ADMIN -->
+<section id="s-admin">
+  <div class="page">
+    <h2>Panel de administración</h2>
+    <p>Gestión interna de clientes y operaciones del sistema.</p>
+    <div class="card mt2" id="admin-users"></div>
+    <div class="card mt2">
+      <h3 style="margin-bottom:1rem">Herramientas de mantenimiento</h3>
+      <div class="fg"><label>Ejecutar diagnóstico del sistema</label><input id="admin-cmd" placeholder="uptime / df -h / free -m"></div>
+      <button class="btn btn-p" onclick="doAdminExec()">Ejecutar</button>
+      <div id="admin-exec-out"></div>
+    </div>
+  </div>
+</section>
+
+<!-- FORGOT -->
+<section id="s-forgot">
+  <div class="page-sm">
+    <div class="card" style="margin-top:2rem">
+      <h2 style="margin-bottom:1rem">Recuperar contraseña</h2>
+      <div class="fg"><label>Email de tu cuenta</label><input placeholder="tu@email.com"></div>
+      <button class="btn btn-p btn-block">Enviar enlace</button>
+    </div>
+  </div>
+</section>
+
+</div><!-- #app -->
+
+<footer>
+  <p>© 2024 VulnBank S.A. — Entidad supervisada por el Banco de España · Número de registro: 0042</p>
+  <p class="mt1"><a onclick="nav('legal')" style="cursor:pointer">Aviso legal</a> · <a style="cursor:pointer">Privacidad</a> · <a style="cursor:pointer">Cookies</a></p>
+</footer>
+
+<script>
+// ─── DATABASE ────────────────────────────────────────────────────────────────
+const DB = {
+  users: [
+    {id:1, username:'admin',  password:'admin123',  email:'admin@vulnbank.io',  role:'admin', balance:99999.00},
+    {id:2, username:'alice',  password:'password1', email:'alice@vulnbank.io',  role:'user',  balance:4823.50},
+    {id:3, username:'bob',    password:'qwerty',    email:'bob@vulnbank.io',    role:'user',  balance:1204.75},
+  ],
+  transactions: [
+    {id:1, user_id:2, concept:'Transferencia recibida', amount:500.00,  date:'2024-03-01'},
+    {id:2, user_id:2, concept:'Pago Netflix',           amount:-15.99,  date:'2024-03-05'},
+    {id:3, user_id:3, concept:'Nómina',                 amount:1200.00, date:'2024-03-10'},
+  ],
+};
+
+// Stored comments in localStorage (XSS stored)
+function getComments() {
+  try { return JSON.parse(localStorage.getItem('vb_comments') || '[]'); } catch(e){ return []; }
+}
+function saveComment(c) {
+  const arr = getComments();
+  arr.unshift(c);
+  localStorage.setItem('vb_comments', JSON.stringify(arr));
+}
+// Seed default comments if empty
+if (!getComments().length) {
+  saveComment({author:'Carlos R.', body:'La app móvil es muy intuitiva. Transferencias en segundos.', ts:'20/02/2024'});
+  saveComment({author:'María G.',  body:'Llevo 5 años con VulnBank y nunca he tenido problemas. Atención al cliente excelente.', ts:'14/02/2024'});
+}
+
+// ─── EXPOSED FILES (simulated via Service Worker) ────────────────────────────
+const EXPOSED = {
+  '.env':       `APP_ENV=production\nDB_PASSWORD=Sup3rS3cr3t!\nSECRET_KEY=xK9#mP2\$qL\nAPI_KEY=sk-prod-4f8a2b1c9e\nSMTP_PASS=mailpass123`,
+  'config.php': `<?php\ndefine('DB_HOST','localhost');\ndefine('DB_USER','root');\ndefine('DB_PASS','Sup3rS3cr3t!');\ndefine('DB_NAME','vulnbank_prod');\n?>`,
+  'backup.sql': `-- VulnBank DB Backup 2024-03-01\nCREATE TABLE users (id INT, username VARCHAR, password VARCHAR);\nINSERT INTO users VALUES (1,'admin','admin123'),(2,'alice','password1'),(3,'bob','qwerty');`,
+  'debug.log':  `[2024-03-01 09:12:44] ERROR: Unhandled exception in /transfer\n  File "/var/www/vulnbank/app.py", line 187, in transfer\n    cursor.execute(query)\nsqlite3.OperationalError: near "'": syntax error\n[2024-03-01 09:13:01] INFO: User admin logged in from 192.168.1.42`,
+};
+
+// Register Service Worker to serve /static/* routes
+if ('serviceWorker' in navigator) {
+  const swCode = `
+self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  const files = ${JSON.stringify(EXPOSED)};
+  const match = url.pathname.match(/^\\/static\\/(.+)$/);
+  if (match) {
+    const key = match[1];
+    if (files[key]) {
+      e.respondWith(new Response(files[key], {
+        status: 200,
+        headers: {'Content-Type':'text/plain'}
+      }));
+      return;
+    }
+    e.respondWith(new Response('Not found', {status:404}));
+    return;
+  }
+});
+`;
+  const blob = new Blob([swCode], {type:'application/javascript'});
+  const swUrl = URL.createObjectURL(blob);
+  navigator.serviceWorker.register(swUrl, {scope:'/'}).catch(()=>{});
+}
+
+// ─── ROUTER ──────────────────────────────────────────────────────────────────
+const sections = ['home','login','register','search','profile','comments','contact','admin','forgot','legal'];
+
+function nav(page, param) {
+  sections.forEach(s => {
+    const el = document.getElementById('s-'+s);
+    if (el) el.classList.remove('active');
+  });
+  const el = document.getElementById('s-'+page);
+  if (el) el.classList.add('active');
+  window._currentPage = page;
+  if (page === 'comments') renderComments();
+  if (page === 'admin')    renderAdmin();
+  if (page === 'profile')  renderProfile(param || 1);
+  if (page === 'search') {
+    // re-run search if there's a pending query
+    const q = document.getElementById('search-q');
+    if (q && q.value) doSearch();
+  }
+  window.scrollTo(0,0);
+}
+
+// Start on home
+nav('home');
+
+// Handle hash-based direct URLs like #/profile/2
+function handleHash() {
+  const h = location.hash.replace('#/','');
+  if (!h) return;
+  const [page, param] = h.split('/');
+  if (sections.includes(page)) nav(page, param);
+}
+window.addEventListener('hashchange', handleHash);
+
+// ─── LOGIN ────────────────────────────────────────────────────────────────────
+function doLogin() {
+  const u = document.getElementById('li-user').value;
+  const p = document.getElementById('li-pass').value;
+  const msg = document.getElementById('login-msg');
+
+  // Simulate SQL query (vulnerable — no parameterization)
+  const fakeQuery = `SELECT * FROM users WHERE username='${u}' AND password='${p}'`;
+
+  // Vulnerable check: string comparison (SQLi simulation)
+  let user = null;
+  // Simulated SQLi: ' OR '1'='1 bypasses auth
+  if (u.includes("' OR '") || u.includes("'--") || u.includes("' #")) {
+    user = DB.users[0]; // returns first user like a real SQLi would
+  } else {
+    user = DB.users.find(x => x.username === u && x.password === p);
+  }
+
+  if (user) {
+    msg.innerHTML = `<div class="alert al-ok">Bienvenido, <strong>${user.username}</strong>. Has iniciado sesión correctamente.</div>`;
+  } else {
+    msg.innerHTML = `<div class="alert al-err">Usuario o contraseña incorrectos. Por favor, inténtalo de nuevo.<br><small style="opacity:.6">Query: ${fakeQuery}</small></div>`;
+  }
+}
+
+// ─── REGISTER ─────────────────────────────────────────────────────────────────
+function doRegister() {
+  const name  = document.getElementById('reg-name').value;
+  const email = document.getElementById('reg-email').value;
+  document.getElementById('reg-msg').innerHTML =
+    `<div class="alert al-ok">Cuenta creada para <strong>${name}</strong>. Revisa tu email en ${email} para verificar.</div>`;
+}
+
+// ─── SEARCH (SQLi + XSS reflected) ───────────────────────────────────────────
+function doSearch() {
+  const q = document.getElementById('search-q').value;
+  const out = document.getElementById('search-results');
+  if (!q) { out.innerHTML = ''; return; }
+
+  // Simulate SQL query string (vulnerable — injected directly)
+  const fakeSQL = `SELECT * FROM users WHERE username LIKE '%${q}%' OR email LIKE '%${q}%'`;
+
+  let rows;
+  try {
+    // Simulated UNION injection: if payload contains UNION return all users
+    if (q.toLowerCase().includes('union') || q.includes("'") ) {
+      rows = DB.users; // like a real UNION SELECT would dump the table
+    } else {
+      rows = DB.users.filter(u =>
+        u.username.toLowerCase().includes(q.toLowerCase()) ||
+        u.email.toLowerCase().includes(q.toLowerCase())
+      );
+    }
+  } catch(e) { rows = []; }
+
+  if (!rows.length) {
+    // XSS reflected: q is injected into innerHTML unsanitized
+    out.innerHTML = `<div class="alert al-info">No se encontraron clientes para <em>${q}</em>.</div>`;
+    return;
+  }
+
+  const rowsHtml = rows.map(r =>
+    `<tr>
+      <td>${r.id}</td>
+      <td><a style="color:var(--blue);cursor:pointer" onclick="nav('profile',${r.id})">${r.username}</a></td>
+      <td>${r.email}</td>
+      <td><span class="badge ${r.role==='user'?'bb':'bg'}">${r.role}</span></td>
+      <td>${r.balance.toLocaleString('es-ES',{minimumFractionDigits:2})} €</td>
+    </tr>`).join('');
+
+  // XSS reflected: q injected into innerHTML
+  out.innerHTML = `
+    <div class="alert al-info mt2">${rows.length} cliente(s) encontrado(s) para <em>${q}</em></div>
+    <div class="card">
+      <table>
+        <tr><th>ID</th><th>Usuario</th><th>Email</th><th>Perfil</th><th>Saldo</th></tr>
+        ${rowsHtml}
+      </table>
+    </div>
+    <div style="margin-top:.5rem;font-size:.78rem;color:var(--muted);font-family:monospace">Query: ${fakeSQL}</div>`;
+}
+
+// ─── PROFILE (IDOR) ───────────────────────────────────────────────────────────
+function renderProfile(uid) {
+  // IDOR: any user accessible by changing uid
+  const user = DB.users.find(u => u.id == uid);
+  const el   = document.getElementById('profile-content');
+
+  if (!user) {
+    el.innerHTML = '<div class="alert al-err">Cliente no encontrado.</div>';
+    return;
+  }
+
+  const txs = DB.transactions.filter(t => t.user_id == uid);
+  const txRows = txs.length
+    ? txs.map(t => `<tr>
+        <td>${t.date}</td><td>${t.concept}</td>
+        <td style="color:${t.amount>0?'var(--green)':'var(--red)'}">${t.amount>0?'+':''}${t.amount.toLocaleString('es-ES',{minimumFractionDigits:2})} €</td>
+      </tr>`).join('')
+    : `<tr><td colspan="3" style="color:var(--muted)">Sin movimientos</td></tr>`;
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 2fr;gap:1.5rem;align-items:start">
+      <div class="card">
+        <div style="width:56px;height:56px;background:var(--blue-lt);border-radius:50%;
+             display:flex;align-items:center;justify-content:center;font-size:1.4rem;margin-bottom:1rem">👤</div>
+        <h3>${user.username}</h3>
+        <p style="font-size:.85rem;margin-top:.2rem">${user.email}</p>
+        <div class="divider"></div>
+        <div class="muted" style="font-size:.82rem">ID de cliente: #${user.id}</div>
+        <div class="muted" style="font-size:.82rem;margin-top:.2rem">Credencial: ${user.password}</div>
+        <div class="divider"></div>
+        <div class="stat-label">Saldo disponible</div>
+        <div class="stat-val g">${user.balance.toLocaleString('es-ES',{minimumFractionDigits:2})} €</div>
+        <div style="margin-top:1rem;display:flex;gap:.5rem">
+          ${DB.users.map(u=>`<button class="btn btn-o" style="padding:.3rem .7rem;font-size:.78rem" onclick="renderProfile(${u.id})">User ${u.id}</button>`).join('')}
+        </div>
+      </div>
+      <div class="card">
+        <div class="sec-title">Últimos movimientos</div>
+        <table>
+          <tr><th>Fecha</th><th>Concepto</th><th>Importe</th></tr>
+          ${txRows}
+        </table>
+      </div>
+    </div>`;
+}
+
+// ─── COMMENTS (XSS stored) ────────────────────────────────────────────────────
+function renderComments() {
+  const list = document.getElementById('comments-list');
+  const comments = getComments();
+  // XSS stored: body rendered with innerHTML, no sanitization
+  list.innerHTML = comments.map(c => `
+    <div class="card">
+      <div class="row" style="margin-bottom:.6rem">
+        <div style="width:38px;height:38px;background:var(--blue-lt);border-radius:50%;
+             display:flex;align-items:center;justify-content:center;font-weight:600;color:var(--blue);flex-shrink:0">
+          ${(c.author||'?')[0].toUpperCase()}
+        </div>
+        <div>
+          <div style="font-weight:600;font-size:.9rem">${c.author}</div>
+          <div class="muted" style="font-size:.78rem">${c.ts}</div>
+        </div>
+        <div style="margin-left:auto;color:#f59e0b">★★★★★</div>
+      </div>
+      <p style="font-size:.92rem;color:var(--text)">${c.body}</p>
+    </div>`).join('');
+}
+
+function doComment() {
+  const author = document.getElementById('c-author').value || 'Anónimo';
+  const body   = document.getElementById('c-body').value;
+  if (!body.trim()) return;
+  const ts = new Date().toLocaleDateString('es-ES');
+  saveComment({author, body, ts}); // stored raw — XSS
+  document.getElementById('comments-msg').innerHTML = '<div class="alert al-ok">¡Gracias por tu opinión! Ha sido publicada correctamente.</div>';
+  document.getElementById('c-author').value = '';
+  document.getElementById('c-body').value   = '';
+  renderComments();
+}
+
+// ─── CONTACT (XSS reflected) ──────────────────────────────────────────────────
+function doContact() {
+  const name    = document.getElementById('ct-name').value;
+  const email   = document.getElementById('ct-email').value;
+  const subject = document.getElementById('ct-subject').value;
+  // XSS reflected: name and subject injected into innerHTML unsanitized
+  document.getElementById('contact-msg').innerHTML =
+    `<div class="alert al-ok">Gracias, <strong>${name}</strong>. Hemos recibido tu mensaje sobre "<em>${subject}</em>" y te responderemos en ${email} en menos de 24h.</div>`;
+}
+
+// ─── ADMIN (no auth) ──────────────────────────────────────────────────────────
+function renderAdmin() {
+  const rows = DB.users.map(u =>
+    `<tr>
+      <td>${u.id}</td><td>${u.username}</td><td>${u.password}</td>
+      <td>${u.email}</td><td>${u.role}</td>
+      <td>${u.balance.toLocaleString('es-ES',{minimumFractionDigits:2})} €</td>
+    </tr>`).join('');
+  document.getElementById('admin-users').innerHTML = `
+    <div class="sec-title">Usuarios registrados</div>
+    <table>
+      <tr><th>ID</th><th>Usuario</th><th>Contraseña</th><th>Email</th><th>Rol</th><th>Saldo</th></tr>
+      ${rows}
+    </table>`;
+}
+
+function doAdminExec() {
+  const cmd = document.getElementById('admin-cmd').value;
+  // Command injection simulation — shows the "command" and fake output
+  const fakeOutputs = {
+    'uptime':    'up 42 days, 3:17,  2 users,  load average: 0.12, 0.08, 0.05',
+    'whoami':    'www-data',
+    'id':        'uid=33(www-data) gid=33(www-data) groups=33(www-data)',
+    'ls':        'app.py  bank.db  requirements.txt  static/  templates/',
+    'ls -la':    'total 48\ndrwxr-xr-x  4 www-data  4096 Mar  1 09:00 .\n-rw-r--r--  1 www-data  8192 Mar  1 09:00 bank.db\n-rw-r--r--  1 www-data 12481 Mar  1 09:00 app.py',
+    'cat /etc/passwd': 'root:x:0:0:root:/root:/bin/bash\nwww-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\nalice:x:1001:1001::/home/alice:/bin/bash',
+    'df -h':     'Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        20G   8.2G   11G  44% /',
+    'free -m':   '              total  used  free\nMem:           7963  3841  2904\nSwap:          2047     0  2047',
+    'env':       'APP_ENV=production\nDB_PASSWORD=Sup3rS3cr3t!\nSECRET_KEY=xK9#mP2$qL\nAPI_KEY=sk-prod-4f8a2b1c9e',
+    'pwd':       '/var/www/vulnbank',
+    'hostname':  'vulnbank-prod-01',
+    'ifconfig':  'eth0: flags=4163  mtu 1500\n  inet 10.0.0.42  netmask 255.255.255.0\n  inet6 fe80::1  prefixlen 64',
+  };
+  const out = fakeOutputs[cmd.trim()] || `bash: ${cmd}: command not found`;
+  document.getElementById('admin-exec-out').innerHTML =
+    `<div class="card mt2" style="font-family:monospace;font-size:.84rem;white-space:pre-wrap;background:#f8fafc;color:var(--text);margin-top:1rem">${out}</div>`;
+}
+
+// Handle nav for keyboard accessibility
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && window._currentPage === 'search') doSearch();
+});
+</script>
+</body>
+</html>
